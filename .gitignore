@@ -1,0 +1,23 @@
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Local configuration & credentials
+.env
+
+# Python build/cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# User output and runtime logs
+output/
+*.log
+mock_db*.json
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,9 @@
+neo4j>=5.20.0
+groq>=1.4.0
+sentence-transformers>=3.0.0
+networkx>=3.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pytest>=8.0.0
+pypdf>=4.0.0
+streamlit>=1.30.0
