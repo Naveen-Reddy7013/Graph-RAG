@@ -15,15 +15,16 @@ class GlobalThinkerAgent:
     def __init__(self, db_client: GraphDatabaseClient):
         self.db = db_client
 
-    def answer_query(self, query: str) -> Tuple[str, Dict[str, List[str]], List[Dict[str, Any]]]:
+    def answer_query(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Answers a global query using community summaries.
         
-        Returns a tuple:
-        - answer: The final synthesized text (500 - 2000 words).
-        - graph_context: Dictionary with communities_traversed, nodes_visited, and edges_traversed.
-        - sources: List of source records used for grounding.
+        Input/Output:
+        - state: The shared AgentState dictionary.
         """
+        query = state["query"]
+        chat_history = state.get("chat_history", [])
+        
         logger.info(f"Global Thinker processing query: '{query}'")
 
         # Step 1: Fetch all community summaries from the database
@@ -31,12 +32,13 @@ class GlobalThinkerAgent:
 
         if not community_summaries:
             logger.warning("No community summaries found in the database. Returning default response.")
-            return (
+            state["answer"] = (
                 "I couldn't find any community summaries in the database to synthesize a global answer. "
-                "Please run ingestion and clustering first.",
-                {"communities_traversed": [], "nodes_visited": [], "edges_traversed": []},
-                []
+                "Please run ingestion and clustering first."
             )
+            state["graph_context"] = {"communities_traversed": [], "nodes_visited": [], "edges_traversed": []}
+            state["sources"] = []
+            return state
 
         logger.info(f"Retrieved {len(community_summaries)} community summaries from the database.")
 
@@ -75,7 +77,7 @@ class GlobalThinkerAgent:
             "Do not hypothesize, extrapolate, or hallucinate."
         )
 
-        prompt = self._prepare_synthesis_prompt(query, community_summaries)
+        prompt = self._prepare_synthesis_prompt(query, community_summaries, chat_history)
         
         try:
             logger.info("Sending community summaries to LLM for global synthesis...")
@@ -91,21 +93,31 @@ class GlobalThinkerAgent:
                 "edges_traversed": list(edges_traversed)
             }
             
-            return answer, graph_context, sources
+            state["answer"] = answer
+            state["graph_context"] = graph_context
+            state["sources"] = sources
+            return state
 
         except Exception as e:
             logger.error(f"Error generating global answer: {e}")
-            return (
-                f"An error occurred while synthesizing the global answer: {e}",
-                {"communities_traversed": [], "nodes_visited": [], "edges_traversed": []},
-                []
-            )
+            state["answer"] = f"An error occurred while synthesizing the global answer: {e}"
+            state["graph_context"] = {"communities_traversed": [], "nodes_visited": [], "edges_traversed": []}
+            state["sources"] = []
+            return state
 
-    def _prepare_synthesis_prompt(self, query: str, summaries: Dict[str, str]) -> str:
+    def _prepare_synthesis_prompt(self, query: str, summaries: Dict[str, str], chat_history: List[Dict[str, str]] = None) -> str:
         """
         Formats all community summaries into a clear prompt for global synthesis.
+        Supports conversation context injection.
         """
-        prompt = f"User Query: {query}\n\n"
+        prompt = ""
+        if chat_history:
+            prompt += "Here is the conversation history so far for dialogue continuity:\n"
+            for turn in chat_history:
+                prompt += f"User: {turn['user']}\nAssistant: {turn['assistant']}\n"
+            prompt += "\n"
+            
+        prompt += f"User Query: {query}\n\n"
         prompt += "Below are the summaries of different chapters, characters, and events from the book:\n\n"
 
         for comm_id, summary in summaries.items():

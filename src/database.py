@@ -58,7 +58,23 @@ class GraphDatabaseClient:
                 try:
                     # Run the Cypher query to create the database if it doesn't exist
                     session.run(f"CREATE DATABASE {db_name} IF NOT EXISTS")
-                    logger.info(f"Database '{db_name}' verified/created successfully.")
+                    logger.info(f"Database '{db_name}' verified/created successfully. Waiting for it to become online...")
+                    
+                    import time
+                    online = False
+                    for _ in range(15):
+                        res = session.run(f"SHOW DATABASE {db_name}")
+                        record = res.single()
+                        if record and record.get("currentStatus") == "online":
+                            online = True
+                            break
+                        time.sleep(0.5)
+                    
+                    if online:
+                        logger.info(f"Database '{db_name}' is now online.")
+                    else:
+                        logger.warning(f"Database '{db_name}' was created but status is not online yet.")
+                    
                     # Update our target database name
                     self.database_name = db_name
                 except Exception as e:
@@ -68,6 +84,8 @@ class GraphDatabaseClient:
                         f"If you are running Neo4j Community Edition, it only supports the default 'neo4j' database. \n"
                         f"We will fall back to using your default database. Error details: {e}"
                     )
+                    # Reset database name to default 'neo4j' to prevent subsequent DatabaseNotFound errors
+                    self.database_name = "neo4j"
 
 
     def _save_mock_db(self):

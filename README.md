@@ -132,3 +132,4 @@ This single command will:
 # python run.py --query "How is Tony Stark connected to Pepper Potts ?"
 # python run.py --query "How is Tony Stark connected to Pepper Potts ?" --database storygraph --skip-ingest
 # python run.py --query "how is maya connected to victor in this story" --database storygraph4 --skip-ingest
+# python run.py --chat --database storygraph9 --skip-ingest

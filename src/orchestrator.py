@@ -1,7 +1,7 @@
 import time
 import uuid
 import logging
-from typing import Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple
 from src.database import GraphDatabaseClient
 from src.agents.map_maker import MapMakerAgent
 from src.agents.cluster_grouper import ClusterGrouperAgent
@@ -56,21 +56,44 @@ class GraphRAGOrchestrator:
         logger.info("--- INGESTION STAGE COMPLETE ---")
         self.print_ingestion_breakdown()
 
-    def query_pipeline(self, query: str, mode: str = "local", max_hops: int = 2) -> Dict[str, Any]:
+    def query_pipeline(self, query: str, mode: str = "local", max_hops: int = 2, chat_history: List[Dict[str, str]] = None) -> Dict[str, Any]:
         """
         Executes query routing, traverses nodes, aggregates summaries,
-        evaluates answer correctness, and generates a structured output schema dictionary.
+        evaluates answer correctness, and generates a structured output schema dictionary
+        by routing a single unified state dictionary through the agent network.
+        Supports multi-turn chat history.
         """
         logger.info(f"--- ROUTING QUERY (Mode: {mode}) ---")
         
         query_start_time = time.time()
         
-        # Step 1: Execute query based on mode (routing)
+        # Initialize the shared AgentState dictionary
+        state = {
+            "query_id": str(uuid.uuid4()),
+            "query": query,
+            "mode": mode,
+            "max_hops": max_hops,
+            "answer": "",
+            "graph_context": {
+                "communities_traversed": [],
+                "nodes_visited": [],
+                "edges_traversed": []
+            },
+            "sources": [],
+            "evaluation": {
+                "faithfulness_score": 0.0,
+                "factual_gaps": []
+            },
+            "chat_history": chat_history or [],
+            "metadata": {}
+        }
+        
+        # Step 1: Execute query based on mode (routing the state dictionary)
         if mode.lower() == "global":
             # Global thinker uses pre-computed community summaries.
             # Time spent here counts as generation since it synthesizes existing summaries.
             start_gen = time.time()
-            answer, graph_context, sources = self.global_thinker.answer_query(query)
+            state = self.global_thinker.answer_query(state)
             
             self.timing_breakdown["traversal_seconds"] = 0.0 # No dynamic path traversal in global search
             self.timing_breakdown["generation_seconds"] = time.time() - start_gen
@@ -78,8 +101,8 @@ class GraphRAGOrchestrator:
         elif mode.lower() == "local":
             # Local tracer performs embedding search and database traversal
             start_traverse = time.time()
-            # Vector search and traversal happen within the tracer
-            answer, graph_context, sources = self.local_tracer.answer_query(query, max_hops)
+            # Vector search and traversal happen within the tracer, modifying the state
+            state = self.local_tracer.answer_query(state)
             
             self.timing_breakdown["traversal_seconds"] = time.time() - start_traverse
             # In local mode, generation is part of the agent's work, but for clean separation,
@@ -89,8 +112,8 @@ class GraphRAGOrchestrator:
         else:
             raise ValueError(f"Invalid mode '{mode}' provided. Must be 'global' or 'local'.")
 
-        # Step 2: Evaluate the generated answer
-        eval_result = self.evaluator.evaluate_answer(query, answer, sources)
+        # Step 2: Evaluate the generated answer inside the state dictionary
+        state = self.evaluator.evaluate_answer(state)
         
         query_end_time = time.time()
         execution_seconds = query_end_time - query_start_time
@@ -101,26 +124,18 @@ class GraphRAGOrchestrator:
         total_nodes = len([n for n in nodes if n.get("label") != "Community"])
         total_edges = len(self.db.get_edges())
 
-        # Step 4: Construct the final output matching the schema
-        output = {
-            "query_id": str(uuid.uuid4()),
-            "query": query,
-            "answer": answer,
-            "graph_context": graph_context,
-            "sources": sources,
-            "evaluation": {
-                "faithfulness_score": eval_result["faithfulness_score"],
-                "factual_gaps": eval_result["factual_gaps"]
-            },
-            "metadata": {
-                "total_nodes_in_graph": total_nodes,
-                "total_edges_in_graph": total_edges,
-                "execution_seconds": execution_seconds
-            }
+        # Step 4: Populate final metadata and complete orchestration step
+        state["metadata"] = {
+            "total_nodes_in_graph": total_nodes,
+            "total_edges_in_graph": total_edges,
+            "execution_seconds": execution_seconds
         }
         
+        # Step 5: Append this turn to chat history
+        state["chat_history"].append({"user": query, "assistant": state["answer"]})
+        
         logger.info("--- QUERY PROCESSING COMPLETE ---")
-        return output
+        return state
 
     def print_ingestion_breakdown(self):
         """Prints a clean timing log breakdown for the ingestion steps."""

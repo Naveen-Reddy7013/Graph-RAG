@@ -16,24 +16,26 @@ class EvaluatorAgent:
     def __init__(self):
         pass
 
-    def evaluate_answer(self, query: str, answer: str, sources: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def evaluate_answer(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Evaluates the answer against the retrieved sources.
         
-        Returns a dictionary:
-        {
-          "faithfulness_score": float (0.0 - 1.0),
-          "factual_gaps": List[str]
-        }
+        Input/Output:
+        - state: The shared AgentState dictionary.
         """
         logger.info("Evaluating generated answer for faithfulness...")
+        
+        query = state["query"]
+        answer = state["answer"]
+        sources = state["sources"]
 
         if not sources:
             logger.warning("No sources provided for evaluation. Defaulting to score 0.0 due to lack of grounding context.")
-            return {
+            state["evaluation"] = {
                 "faithfulness_score": 0.0,
                 "factual_gaps": ["No grounding sources were retrieved from the database to verify this answer."]
             }
+            return state
 
         # Format sources text chunks for the LLM
         sources_text = ""
@@ -96,15 +98,17 @@ class EvaluatorAgent:
             factual_gaps = data.get("factual_gaps", [])
             
             logger.info(f"Evaluation complete. Faithfulness score: {score}. Factual gaps found: {len(factual_gaps)}")
-            return {
+            state["evaluation"] = {
                 "faithfulness_score": score,
                 "factual_gaps": factual_gaps
             }
+            return state
 
         except Exception as e:
             logger.error(f"Error during faithfulness evaluation LLM call: {e}")
             # Fallback in case of JSON parse failure or API issue
-            return {
+            state["evaluation"] = {
                 "faithfulness_score": 0.5,
                 "factual_gaps": [f"Evaluation failed to execute properly due to error: {e}"]
             }
+            return state

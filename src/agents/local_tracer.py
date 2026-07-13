@@ -16,20 +16,56 @@ class LocalCharacterTracerAgent:
     def __init__(self, db_client: GraphDatabaseClient):
         self.db = db_client
 
-    def answer_query(self, query: str, max_hops: int = 2) -> Tuple[str, Dict[str, List[str]], List[Dict[str, Any]]]:
+    def _rewrite_query(self, query: str, chat_history: List[Dict[str, str]]) -> str:
+        """
+        Rewrites a conversational query based on chat history to be standalone and entity-resolved.
+        """
+        if not chat_history:
+            return query
+            
+        system_prompt = (
+            "You are an expert Query Rewriter. Given a chat history and a follow-up query, "
+            "your job is to rewrite the query to make it a standalone search query. "
+            "Ensure the rewritten query is fully resolved: replace pronouns (e.g. 'he', 'she', 'they', 'her', 'there') "
+            "with the actual character or location names they refer to from the chat history. "
+            "Return ONLY the final rewritten standalone query text, with no explanations or meta text."
+        )
+        
+        history_text = ""
+        for turn in chat_history:
+            history_text += f"User: {turn['user']}\nAssistant: {turn['assistant']}\n"
+            
+        prompt = f"Chat History:\n{history_text}\nFollow-up Query: {query}\n\nStandalone Query:"
+        
+        try:
+            logger.info("Rewriting follow-up query based on chat history...")
+            rewritten = llm.generate_completion(prompt, system_prompt, temperature=0.0)
+            rewritten_query = rewritten.strip()
+            logger.info(f"Original Query: '{query}' -> Rewritten: '{rewritten_query}'")
+            return rewritten_query
+        except Exception as e:
+            logger.warning(f"Failed to rewrite query: {e}. Using original query.")
+            return query
+
+    def answer_query(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Answers a local query by finding starting nodes, traversing the graph,
         and generating a grounded response.
         
-        Returns:
-        - answer: The grounded narrative text (500 - 2000 words).
-        - graph_context: Dictionary with communities_traversed, nodes_visited, and edges_traversed.
-        - sources: List of source records used for grounding.
+        Input/Output:
+        - state: The shared AgentState dictionary.
         """
-        logger.info(f"Local Tracer processing query: '{query}' with max_hops: {max_hops}")
+        query = state["query"]
+        max_hops = state.get("max_hops", 2)
+        chat_history = state.get("chat_history", [])
+        
+        # Rewrite the query using history to resolve pronouns
+        search_query = self._rewrite_query(query, chat_history)
+        
+        logger.info(f"Local Tracer processing search query: '{search_query}' (Original: '{query}') with max_hops: {max_hops}")
 
         # Step 1: Compute query embedding
-        query_vector = llm.get_embedding(query)
+        query_vector = llm.get_embedding(search_query)
 
         # Step 2: Find starting nodes using cosine similarity
         start_nodes = self._find_start_nodes_vector(query_vector, top_k=2, similarity_threshold=0.45)
@@ -37,15 +73,16 @@ class LocalCharacterTracerAgent:
         if not start_nodes:
             logger.warning("No matching starting nodes found via vector search. Falling back to default search.")
             # If vector search fails to match, let's do a substring/fallback search on all nodes
-            start_nodes = self._find_start_nodes_fallback(query)
+            start_nodes = self._find_start_nodes_fallback(search_query)
             
         if not start_nodes:
-            return (
-                f"I could not identify any characters or locations mentioned in your query '{query}' "
-                "in our graph database. Please verify the spelling or check if the book has been ingested.",
-                {"communities_traversed": [], "nodes_visited": [], "edges_traversed": []},
-                []
+            state["answer"] = (
+                f"I could not identify any characters or locations mentioned in your query '{search_query}' "
+                "in our graph database. Please verify the spelling or check if the book has been ingested."
             )
+            state["graph_context"] = {"communities_traversed": [], "nodes_visited": [], "edges_traversed": []}
+            state["sources"] = []
+            return state
 
         logger.info(f"Identified starting node(s) for query: {[n['name'] for n in start_nodes]}")
 
@@ -116,7 +153,7 @@ class LocalCharacterTracerAgent:
             "Do not hypothesize, extrapolate, or hallucinate."
         )
 
-        prompt = self._prepare_tracer_prompt(query, nodes_details, unique_sources)
+        prompt = self._prepare_tracer_prompt(query, nodes_details, unique_sources, chat_history)
         
         try:
             logger.info("Sending graph context paths to LLM for local synthesis...")
@@ -131,15 +168,21 @@ class LocalCharacterTracerAgent:
                 "edges_traversed": list(all_traversed_edges)
             }
 
-            return answer, graph_context, unique_sources
+            state["answer"] = answer
+            state["graph_context"] = graph_context
+            state["sources"] = unique_sources
+            return state
 
         except Exception as e:
             logger.error(f"Error generating local answer: {e}")
-            return (
-                f"An error occurred while tracing character paths: {e}",
-                {"communities_traversed": [], "nodes_visited": list(all_visited_nodes), "edges_traversed": list(all_traversed_edges)},
-                unique_sources
-            )
+            state["answer"] = f"An error occurred while tracing character paths: {e}"
+            state["graph_context"] = {
+                "communities_traversed": [],
+                "nodes_visited": list(all_visited_nodes),
+                "edges_traversed": list(all_traversed_edges)
+            }
+            state["sources"] = unique_sources
+            return state
 
     def _cosine_similarity(self, v1: List[float], v2: List[float]) -> float:
         """
@@ -209,12 +252,20 @@ class LocalCharacterTracerAgent:
                 
         return matches[:2]
 
-    def _prepare_tracer_prompt(self, query: str, nodes: List[Dict], sources: List[Dict]) -> str:
+    def _prepare_tracer_prompt(self, query: str, nodes: List[Dict], sources: List[Dict], chat_history: List[Dict[str, str]] = None) -> str:
         """
         Formats node profile details and edge path links into a clear markdown
         context description for the LLM to write a path-based response.
+        Supports conversation context injection.
         """
-        prompt = f"User Query: {query}\n\n"
+        prompt = ""
+        if chat_history:
+            prompt += "Here is the conversation history so far for dialogue continuity:\n"
+            for turn in chat_history:
+                prompt += f"User: {turn['user']}\nAssistant: {turn['assistant']}\n"
+            prompt += "\n"
+            
+        prompt += f"User Query: {query}\n\n"
         prompt += "Below is the context containing details about characters, locations, and their relationships:\n\n"
 
         prompt += "### Profiles:\n"

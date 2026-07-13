@@ -301,6 +301,12 @@ def get_simulated_embedding(text: str) -> list:
 # --- End of Mock LLM implementation ---
 
 def main():
+    import sys
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+        
     setup_logging()
     logger = logging.getLogger("run")
 
@@ -319,6 +325,8 @@ def main():
     parser.add_argument("--no-mock-llm", dest="mock_llm", action="store_false", help="Disable mock LLM (Mock LLM is disabled by default)")
     parser.set_defaults(mock_llm=False)
     
+    parser.add_argument("--chat", action="store_true", help="Start an interactive chatbot session")
+    
     # Input JSON Schema parsing
     parser.add_argument("--input-json", type=str, default=None, help="Complete input parameters matching the JSON Input Schema")
     
@@ -327,7 +335,7 @@ def main():
     # We only read stdin if it is not a tty AND the user did not pass query/pdf flags
     # (to prevent blocking in environments that redirect stdin, like VS Code or terminal agents)
     input_json_data = None
-    has_cli_args = any(arg in sys.argv for arg in ["--query", "--pdf", "--chapters-dir", "--input-json"])
+    has_cli_args = any(arg in sys.argv for arg in ["--query", "--pdf", "--chapters-dir", "--input-json", "--chat"])
     
     if not sys.stdin.isatty() and not has_cli_args:
         logger.info("Piped stdin stream detected. Reading JSON Input Schema...")
@@ -407,39 +415,66 @@ def main():
         else:
             logger.info("Skipping ingestion. Running query directly against active database.")
 
-        # Step 5: Query Processing Stage (Global Thinker / Local Tracer)
-        logger.info(f"Executing query with mode '{args.mode}', max_hops {args.max_hops}...")
-        result = orchestrator.query_pipeline(args.query, args.mode, args.max_hops)
-
-        # Step 6: Save JSON response to output/query_result.json
-        output_dir = "output"
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, "query_result.json")
-        
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2)
-        logger.info(f"Saved complete response JSON to {output_path}")
-
-        # Step 7: Print output in requested format
-        print("\n" + "="*80)
-        print(f"QUERY: {result['query']}")
-        print("="*80)
-        
-        if args.output_format == "json":
-            print(json.dumps(result, indent=2))
+        # Step 5: Route to Chatbot Loop or Single Query
+        if args.chat:
+            logger.info("Entering interactive chatbot mode...")
+            chat_history = []
+            print("\n" + "="*60)
+            print("GraphRAG Chatbot Mode. Type 'exit' or 'quit' to end the session.")
+            print("="*60)
+            while True:
+                try:
+                    query = input("\nChat> ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print("\nExiting chat. Goodbye!")
+                    break
+                if not query:
+                    continue
+                if query.lower() in ["exit", "quit"]:
+                    print("\nExiting chat. Goodbye!")
+                    break
+                
+                # Execute query pipeline passing current chat history
+                result = orchestrator.query_pipeline(query, args.mode, args.max_hops, chat_history=chat_history)
+                
+                # Show the answer
+                print(f"\n{result['answer']}")
+                
+                # Update the conversation chat history list
+                chat_history = result.get("chat_history", [])
         else:
-            print(f"## Answer\n\n{result['answer']}\n")
-            print(f"### Metadata\n")
-            print(f"- **Query ID**: {result['query_id']}")
-            print(f"- **Faithfulness Score**: {result['evaluation']['faithfulness_score']}")
-            print(f"- **Factual Gaps**: {', '.join(result['evaluation']['factual_gaps']) or 'None'}")
-            print(f"- **Total Nodes Visited**: {len(result['graph_context']['nodes_visited'])}")
-            print(f"- **Total Edges Traversed**: {len(result['graph_context']['edges_traversed'])}")
-            print(f"- **Communities Traversed**: {', '.join(result['graph_context']['communities_traversed']) or 'None'}")
-            print(f"- **Execution Time**: {result['metadata']['execution_seconds']:.2f} seconds")
+            logger.info(f"Executing query with mode '{args.mode}', max_hops {args.max_hops}...")
+            result = orchestrator.query_pipeline(args.query, args.mode, args.max_hops)
 
-        # Step 8: Print timing execution breakdown
-        orchestrator.print_query_breakdown(result["metadata"]["execution_seconds"])
+            # Step 6: Save JSON response to output/query_result.json
+            output_dir = "output"
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, "query_result.json")
+            
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2)
+            logger.info(f"Saved complete response JSON to {output_path}")
+
+            # Step 7: Print output in requested format
+            print("\n" + "="*80)
+            print(f"QUERY: {result['query']}")
+            print("="*80)
+            
+            if args.output_format == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"## Answer\n\n{result['answer']}\n")
+                print(f"### Metadata\n")
+                print(f"- **Query ID**: {result['query_id']}")
+                print(f"- **Faithfulness Score**: {result['evaluation']['faithfulness_score']}")
+                print(f"- **Factual Gaps**: {', '.join(result['evaluation']['factual_gaps']) or 'None'}")
+                print(f"- **Total Nodes Visited**: {len(result['graph_context']['nodes_visited'])}")
+                print(f"- **Total Edges Traversed**: {len(result['graph_context']['edges_traversed'])}")
+                print(f"- **Communities Traversed**: {', '.join(result['graph_context']['communities_traversed']) or 'None'}")
+                print(f"- **Execution Time**: {result['metadata']['execution_seconds']:.2f} seconds")
+
+            # Step 8: Print timing execution breakdown
+            orchestrator.print_query_breakdown(result["metadata"]["execution_seconds"])
 
     finally:
         db_client.close()
