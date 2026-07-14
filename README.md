@@ -127,9 +127,38 @@ This single command will:
 - **Verify schema output**: `make verify`
 
 
-# python run.py --mock-llm
-# python verify.py
-# python run.py --query "How is Tony Stark connected to Pepper Potts ?"
-# python run.py --query "How is Tony Stark connected to Pepper Potts ?" --database storygraph --skip-ingest
-# python run.py --query "how is maya connected to victor in this story" --database storygraph4 --skip-ingest
-# python run.py --chat --database storygraph9 --skip-ingest
+## 5. CLI Usage Examples
+
+You can run the pipeline directly using `run.py`. Here are the most common commands:
+
+* **Run ingestion and query on default database**:
+  ```bash
+  python run.py --query "How is Tony Stark connected to Pepper Potts?"
+  ```
+* **Query an already ingested database (skipping re-ingestion)**:
+  ```bash
+  python run.py --query "How is Tony Stark connected to Pepper Potts?" --database storygraph9 --skip-ingest
+  ```
+* **Run ingestion and query offline using Mock LLM (no API keys required)**:
+  ```bash
+  python run.py --mock-llm
+  ```
+* **Verify schema compliance of output JSON**:
+  ```bash
+  python verify.py
+  ```
+
+---
+
+## 6. Conversational Chatbot Mode
+
+The pipeline features an interactive **Conversational Chatbot Mode** with dialog memory and query rewriting. To start an interactive session:
+
+```bash
+python run.py --chat --database storygraph9 --skip-ingest
+```
+
+### Key Features:
+- **Interactive Dialogue Loop**: Chat continuously in the terminal; type `exit` or `quit` to end the session.
+- **Dialogue History**: The pipeline stores previous turns inside the state.
+- **Entity Resolution / Query Rewriting**: If you ask follow-up questions with pronouns (e.g. *"Where do they plan to go?"*), a Query Rewriter step translates it to a standalone query (*"Where do Tony Stark and Pepper Potts plan to go?"*) prior to database lookup, maintaining traversal accuracy across turns.
