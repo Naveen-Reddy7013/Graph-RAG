@@ -29,17 +29,17 @@ The system is designed as a multi-agent state-driven pipeline that systematicall
                      +---------------------------+      (NetworkX backend)
                                    |
                 +------------------+------------------+
-                | (Routing Query)                     |
+                | (Routing Query or Chatbot Loop)     |
                 v                                     v
    +------------+------------+           +------------+------------+
    |      Global Thinker     |           |      Local Character     |
-   |      (Query Router)     |           |       Tracer Agent      |
+   |   (Synthesizes pre-     |           |       Tracer Agent      |
+   |   computed summaries)   |           |    (Rewriter + Paths)   |
    +------------+------------+           +------------+------------+
                 |                                     |
-                | (Read Community                     | (Cosine Similarity start node,
-                |  summaries from DB)                 |  N-hop path traversal in DB)
-                |                                     |
-                v                                     v
+                +------------------+------------------+
+                                   |
+                                   v (Pass Ground Truth Sources)
    +------------+-------------------------------------+------------+
    |                           Evaluator Agent                        |
    +----------------------------------+-------------------------------+
@@ -52,148 +52,114 @@ The system is designed as a multi-agent state-driven pipeline that systematicall
 
 ---
 
-## 2. Agent Definitions & Communication Contracts
+## 2. Explicit State-Passing Architecture
 
-The pipeline coordinates five specialized agents:
+To align with modern agentic workflow conventions (like LangGraph), the pipeline routes a single, unified `AgentState` dictionary parameter through all agent executions. Each agent extracts its required variables, executes its logic, mutates the state, and returns it.
 
-1. **The Map Maker (Extractor) Agent** ([map_maker.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/src/agents/map_maker.py))
-   * **Role**: Ingests raw text chunks and extracts entity properties and interaction relationships.
-   * **Input**: Overlapping text chunks (1500 chars with 200 overlap).
-   * **Output**: Normalized character/location list, alias mapping, and relationship tuples.
-   * **Write Contract**: Executes unique constraint initializations and transactional Cypher scripts to load nodes and edges into Neo4j.
-
-2. **The Cluster Grouper Agent** ([cluster_grouper.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/src/agents/cluster_grouper.py))
-   * **Role**: Partitions the graph network into topological thematic communities.
-   * **Input**: Active node list and relationship graph retrieved from the database.
-   * **Process**: Runs Louvain community detection.
-   * **Output**: Writes a `Community` report node for each detected cluster back to the database.
-
-3. **The Global Thinker (Query Router) Agent** ([global_thinker.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/src/agents/global_thinker.py))
-   * **Role**: Resolves broad, holistic queries (e.g. *"What are the main themes of the story?"*).
-   * **Input**: User query and all pre-computed community summaries.
-   * **Output**: A comprehensive story synopsis organized into narrative headers.
-
-4. **The Local Character Tracer Agent** ([local_tracer.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/src/agents/local_tracer.py))
-   * **Role**: Resolves entity-specific relationship queries (e.g. *"How is Tony Stark connected to Pepper Potts?"*).
-   * **Input**: User query, starting nodes, and `max_hops` parameter (1-3).
-   * **Process**: Performs semantic vector lookup to find start nodes, executes path traversals, and extracts grounded context.
-   * **Output**: A grounded narrative tracing character relationships.
-
-5. **The Evaluator Agent** ([evaluator.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/src/agents/evaluator.py))
-   * **Role**: Evaluates generated answers for absolute grounding correctness.
-   * **Input**: Synthesized answer text and the raw retrieved database sources.
-   * **Output**: Faithfulness score (0.0 - 1.0) and a list of identified factual gaps.
-
----
-
-## 3. Database Schema Specification
-
-The graph network is structured in Neo4j (or an in-memory mock fallback) using the following properties:
-
-### 1. Character Nodes (`:Character`)
-* `id` (String, Unique): Normalized key (e.g., `tony_stark`).
-* `name` (String): Canonical name (e.g., `Tony Stark`).
-* `description` (String): Aggregated descriptions across all chapters (separated by `|`).
-* `aliases` (List of Strings): Recognized synonyms (e.g., `["Iron Man", "Tony"]`).
-* `embedding` (List of Floats): 384-dimensional vector embedding of the node name.
-* `community_id` (Integer): The ID of the Louvain cluster the character belongs to.
-
-### 2. Location Nodes (`:Location`)
-* `id` (String, Unique): Normalized key (e.g., `stark_tower`).
-* `name` (String): Canonical name (e.g., `Stark Tower`).
-* `description` (String): Aggregated geographical description details.
-* `embedding` (List of Floats): 384-dimensional vector embedding of the location name.
-* `community_id` (Integer): The ID of the Louvain cluster the location belongs to.
-
-### 3. Relationships (`-[:INTERACTED_WITH]->`, `-[:LOCATED_IN]->`)
-* `id` (String, Unique): Compound key + description hash (e.g., `tony_stark-INTERACTED_WITH-pepper_potts_86154`).
-* `description` (String): Specific text-grounded description of the interaction or placement.
-
----
-
-## 4. Entity Resolution & Deduplication Strategy
-
-To prevent graph fragmentation (e.g. creating separate disconnected nodes for "Tony Stark", "Stark", and "Iron Man"), the pipeline executes a **Two-Stage Deduplication Process**:
-
-1. **Database Layer Integrity**:
-   An explicit database constraint is initialized on startup:
-   ```cypher
-   CREATE CONSTRAINT FOR (c:Character) REQUIRE c.id IS UNIQUE;
-   CREATE CONSTRAINT FOR (l:Location) REQUIRE l.id IS UNIQUE;
-   ```
-2. **LLM-Based Batch Resolution**:
-   After extracting raw entities, they are sent in a single batch to the LLM. The LLM groups names referring to the same entity and returns a mapping:
-   $$\text{"Iron Man"} \rightarrow \text{"Tony Stark"}, \quad \text{"Tony"} \rightarrow \text{"Tony Stark"}$$
-3. **Cypher MERGE Ingestion**:
-   Nodes are committed using standard Cypher scripts that merge properties and accumulate historical logs:
-   ```cypher
-   MERGE (c:Character {id: $id})
-   ON CREATE SET c.name = $name, c.description = $description, c.aliases = $aliases, c.embedding = $embedding
-   ON MATCH SET c.description = c.description + " | " + $description,
-                c.aliases = REDUCE(s = c.aliases, x IN $aliases | CASE WHEN x IN s THEN s ELSE s + x END),
-                c.embedding = $embedding
-   ```
-
----
-
-## 5. Input and Output JSON Schemas
-
-### Input Parameters Schema
-```json
-{
-  "query": "How is Tony Stark connected to Pepper Potts ?",
-  "mode": "local",
-  "max_hops": 2,
-  "output_format": "json"
-}
-```
-
-### Output Parameters Schema
-```json
-{
-  "query_id": "ffc2998c-a2b8-4fcb-80de-e611e78f4ab2",
-  "query": "How is Tony Stark connected to Pepper Potts ?",
-  "answer": "Tony Stark and Pepper Potts are partners at Stark Industries...",
-  "graph_context": {
-    "communities_traversed": ["1", "2"],
-    "nodes_visited": ["tony_stark", "pepper_potts", "stark_tower"],
-    "edges_traversed": ["tony_stark-INTERACTED_WITH-pepper_potts"]
-  },
-  "sources": [
-    {
-      "source_id": "tony_stark-INTERACTED_WITH-pepper_potts_86154",
-      "text_chunk": "Connection: tony_stark interacts with pepper_potts (details: Tony Stark enters and speaks with Pepper Potts...)",
-      "relevance_score": 0.95
+### The AgentState Schema
+The shared state dictionary is defined and updated across the pipeline execution lifecycle:
+```python
+state = {
+    "query_id": str,                  # Unique UUID v4 for the transaction
+    "query": str,                     # The original user input question
+    "mode": str,                      # Search mode: "local" or "global"
+    "max_hops": int,                  # Max relationship connections to traverse (1-3)
+    "answer": str,                    # Grounded text answer synthesized by the tracer/thinker
+    "graph_context": {                # Subgraph context parsed during traversal
+        "communities_traversed": list,
+        "nodes_visited": list,
+        "edges_traversed": list
+    },
+    "sources": list,                  # Traversed database source records used for grounding
+    "evaluation": {                   # Faithfulness audit results
+        "faithfulness_score": float,  # Numeric rating clamped between 0.0 and 1.0
+        "factual_gaps": list          # Specific unsupported claims flagged by the LLM
+    },
+    "chat_history": list,             # Accumulated dialogue turns for multi-turn chatbot mode
+    "metadata": {                     # Operational logging metrics
+        "total_nodes_in_graph": int,
+        "total_edges_in_graph": int,
+        "execution_seconds": float
     }
-  ],
-  "evaluation": {
-    "faithfulness_score": 1.0,
-    "factual_gaps": []
-  },
-  "metadata": {
-    "total_nodes_in_graph": 6,
-    "total_edges_in_graph": 8,
-    "execution_seconds": 6.96
-  }
 }
 ```
 
 ---
 
-## 6. Output Verification Logic (`verify.py`)
+## 3. Conversational Chatbot Mode & Query Rewriting
 
-A standalone validation utility ([verify.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/verify.py)) validates the output file against the following strict constraints:
-1. **JSON Key Compliance**: Checks for all root properties.
-2. **UUID Format Check**: Validates `query_id` matches standard UUID structures.
-3. **Score Ranges**: Validates that all relevance and faithfulness scores are numeric values clamped between `0.0` and `1.0`.
-4. **Answer Word Count**: Verifies that the answer is within the range of **500 - 2000 words**.
-5. **Database Node Verification**: Performs a live Cypher query to retrieve all active database nodes, cross-referencing each value in `graph_context.nodes_visited` to ensure no nodes are hallucinated by the agent.
+We added an interactive dialogue session option (`--chat`) to the pipeline. Because conversational queries often rely on pronouns (*"How is he connected to her?"* or *"Where do they go?"*), passing follow-up inputs directly to vector search leads to matching failures.
+
+To resolve this, we implemented a **Two-Stage Conversational Query Routing** process:
+
+1. **The Query Rewriting Step**:
+   Before initiating a graph search, the `LocalCharacterTracerAgent` invokes a private `_rewrite_query` helper. This sends the current query and the `chat_history` list to the LLM, prompting it to resolve pronouns into standalone search queries containing canonical names:
+   $$\text{"Where do they plan to go?"} \quad \xrightarrow{\text{chat\_history}} \quad \text{"Where do Tony Stark and Pepper Potts plan to go?"}$$
+2. **Context Prepending**:
+   The dialogue history turns are prepended to the final synthesis prompts of `local_tracer` and `global_thinker` to ensure narrative continuity.
 
 ---
 
-## 7. Advanced Enhancements
+## 4. Agent Definitions & Communication Contracts
 
-We implemented the following features beyond the baseline specifications:
-* **Dual-Mode Fallback**: The client automatically detects if local Neo4j is offline, falling back to a functional, locally persistent in-memory database simulation using `NetworkX` to prevent development blockers.
-* **Deterministic Grounding**: Tuned local and global thinkers to operate at `temperature=0.0`, ensuring answers are grounded, objective, and achieve a **1.0 Faithfulness rating** in the evaluator.
-* **Streamlit UI Application**: Built an interactive visual portal (`app.py`) allowing users to ingest chapters, query the GraphRAG pipeline, and visually explore the active network graph in their browser.
+1. **The Map Maker Agent** ([map_maker.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/src/agents/map_maker.py))
+   * **Role**: Splits raw chapter texts into 1500-char overlapping blocks and extracts nodes and edge tuples.
+   * **Write Contract**: Enforces unique database constraints and executes Cypher merge statements.
+2. **The Cluster Grouper Agent** ([cluster_grouper.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/src/agents/cluster_grouper.py))
+   * **Role**: Detects communities using Louvain modularity, groups nodes into communities, and saves LLM-generated community summary reports.
+3. **The Local Character Tracer Agent** ([local_tracer.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/src/agents/local_tracer.py))
+   * **Role**: Resolves local relationship queries. Rewrites pronouns using `chat_history`, executes vector searches to locate starting nodes, and runs Cypher path traversals.
+4. **The Global Thinker Agent** ([global_thinker.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/src/agents/global_thinker.py))
+   * **Role**: Resolves holistic queries. Aggregates pre-computed community summaries to generate book-wide reports.
+5. **The Evaluator Agent** ([evaluator.py](file:///n:/My%20Work/HSBC/Graph%20RAG%20-%20Book%20Summarizer/src/agents/evaluator.py))
+   * **Role**: Compares generated responses against the retrieved raw database records to calculate faithfulness scores.
+
+---
+
+## 5. Database Schema Specification
+
+Nodes and edges are modeled in Neo4j (or NetworkX fallback) as follows:
+
+### Node Properties
+* **Character Node (`:Character`)**:
+  * `id` (String, Unique Normalized Key): e.g. `tony_stark`
+  * `name` (String): e.g. `Tony Stark`
+  * `description` (String): Accumulated descriptions across chapters (joined by `|`).
+  * `aliases` (List of Strings): Recognized synonyms (e.g. `["Iron Man", "Tony"]`).
+  * `embedding` (List of 384 Floats): Vector embedding of the node name.
+  * `community_id` (Integer): Assigned Louvain modularity group ID.
+* **Location Node (`:Location`)**:
+  * `id` (String, Unique Normalized Key): e.g. `stark_tower`
+  * `name` (String): e.g. `Stark Tower`
+  * `description` (String): Aggregated geographical details.
+  * `embedding` (List of 384 Floats): Vector embedding of the location name.
+  * `community_id` (Integer): Assigned Louvain modularity group ID.
+* **Community Node (`:Community`)**:
+  * `id` (String, Unique): Modularity group number (e.g. `1`).
+  * `summary` (String): LLM community summary report.
+
+### Relationship Edge Properties (`-[:INTERACTED_WITH]->`, `-[:LOCATED_IN]->`, `-[:BELONGS_TO]->`)
+* `id` (String, Unique): Compound identifier (e.g. `pepper_potts-LOCATED_IN-main_laboratory_24841`).
+* `description` (String): Specific text-grounded description of the connection.
+* `chunk_ids` (List of Strings): Array of chunk source keys where this connection was found.
+
+---
+
+## 6. Output Verification & Schema Validation
+
+The standalone validation script `verify.py` ensures query outputs adhere to strict constraints:
+1. **JSON Schema Check**: Verifies all root keys are present.
+2. **Format Checks**: Checks `query_id` is a valid UUID structure.
+3. **Score Constraints**: Checks relevance and faithfulness scores are between `0.0` and `1.0`.
+4. **Answer Word Count**: Confirms answers contain between **500 and 2000 words**.
+5. **Database Grounding Check**: Cross-references every node ID in `graph_context.nodes_visited` with the active database, ensuring no hallucinated nodes are returned.
+
+---
+
+## 7. Robustness Enhancements
+
+We implemented the following features to solve deployment issues:
+* **Online Status Polling**: Neo4j database creations are asynchronous. The database client polls `SHOW DATABASE` to wait for a database to become online before running transactions.
+* **Community Edition Fallback**: If multiple databases are not supported (e.g. Neo4j Community Edition), the client falls back to the default `"neo4j"` database instead of crashing.
+* **Output Stream Reconfiguration**: Windows terminal default encoding (CP1252) crashes on Unicode elements in LLM reports. We reconfigured stdout/stderr streams to `UTF-8` at the start of `main()`.
+* **API Rate-Limit Handling**: Rate-limiting 429 errors from Groq trigger backoffs and retries.
