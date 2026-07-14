@@ -343,22 +343,6 @@ To run the test suite:
 
 ---
 
-## 19. Future Improvements
-
-* **Dynamic Community Pruning**: Filter out low-density communities during global searches to improve synthesis processing times.
-* **Incremental Graph Updates**: Allow new chapters to be loaded and merged into an existing graph without needing to rebuild the complete network from scratch.
-* **Visual Graph Rendering**: Export interactive HTML network visualizations directly from Streamlit.
-
----
-
-## 20. Challenges
-
-* **Windows CLI Encoding**: Default CP1252 terminal encoding crashes when printing UTF-8 characters from LLM reports. We resolved this by reconfiguring stdout/stderr streams to UTF-8.
-* **Neo4j Database Startup Lag**: Asynchronous database creation in Neo4j causes immediate writes to fail. We resolved this by implementing online-status polling checks.
-* **Groq API Rate Limits**: Free tier token rate limits trigger 429 errors. We configured the Groq client to wait out rate-limit windows using exponential backoffs.
-
----
-
-## 22. Conclusion
+## 19. Conclusion
 
 This project delivers a robust, highly modular GraphRAG pipeline that meets and extends the baseline requirements. By separating concerns between Map Maker, Cluster Grouper, search agents, and Evaluator, and implementing a state-passing dictionary flow, the pipeline remains lightweight, deterministic, and highly accurate. The interactive Streamlit dashboard and Conversational Chatbot Mode make it a powerful utility for book summaries.
